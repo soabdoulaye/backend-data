@@ -4,6 +4,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { Server } from 'socket.io';
 import 'reflect-metadata';
+import { chatVoiceRouter } from './routes/chatRoutes';
 import { chatRouter } from './routes/chat';
 import { authRouter } from './routes/auth';
 import { setupSocketHandlers } from './socket/socketHandlers';
@@ -33,6 +34,7 @@ app.use(express.json());
 // Routes
 app.use('/api/auth', authRouter);
 app.use('/api/chat', chatRouter);
+app.use('/api/chat', chatVoiceRouter);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

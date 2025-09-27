@@ -27,22 +27,19 @@ router.post('/', authenticate, async (req, res) => {
                 error: 'Message is required'
             });
         }
-
-        // Generate a new conversation ID if not provided
-        const chatconversation_id = conversation_id || uuidv4();
-
+       
         // Process user message and get AI response
         const { userMessage, aiMessage } = await processUserMessage(
             message,
             user_id,
-            chatconversation_id
+            conversation_id
         );
 
         // Return the response
         return res.status(200).json({
             success: true,
             data: {
-                conversation_id: chatconversation_id,
+                conversation_id: conversation_id,
                 userMessage: {
                     id: userMessage.id,
                     content: userMessage.content,

@@ -1,43 +1,36 @@
-import { AppDataSource } from '../config/database';
-import { ChatMessage } from '../entities/ChatMessage';
-import { User } from '../entities/User';
+import { getSupabaseClient } from '../config/database';
 import { generateAIResponse } from './aiService';
-
-// Repository for ChatMessage entity
-const chatMessageRepository = AppDataSource.getRepository(ChatMessage);
-const userRepository = AppDataSource.getRepository(User);
+import { v4 as uuidv4 } from 'uuid';
 
 /**
- * Save a chat message to the database
+ * Save a chat message to Supabase
  */
 export const saveChatMessage = async (
     content: string,
     sender: 'user' | 'ai',
     user_id: string,
     conversation_id?: string
-): Promise<ChatMessage> => {
-    // Find user
-    const user = await userRepository.findOne({
-        where: { id: user_id }
-    });
+) => {
+    const supabase = getSupabaseClient();
 
-    if (!user) {
-        throw new Error('User not found');
+    const { data, error } = await supabase
+        .from('chat_messages')
+        .insert([
+            {
+                content,
+                sender,
+                user_id,
+                conversation_id,
+            }
+        ])
+        .select()
+        .single();
+
+    if (error) {
+        throw new Error(`Failed to save chat message: ${error.message}`);
     }
 
-    // Create new chat message
-    const chatMessage = chatMessageRepository.create({
-        content,
-        sender,
-        user,
-        user_id,
-        conversation_id
-    });
-
-    // Save chat message to database
-    await chatMessageRepository.save(chatMessage);
-
-    return chatMessage;
+    return data;
 };
 
 /**
@@ -48,33 +41,27 @@ export const getChatMessages = async (
     conversation_id?: string,
     limit: number = 50,
     offset: number = 0
-): Promise<ChatMessage[]> => {
-    // Find user
-    const user = await userRepository.findOne({
-        where: { id: user_id }
-    });
+) => {
+    const supabase = getSupabaseClient();
 
-    if (!user) {
-        throw new Error('User not found');
-    }
+    let query = supabase
+        .from('chat_messages')
+        .select('*')
+        .eq('user_id', user_id)
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limit - 1);
 
-    // Query options
-    const queryOptions: any = {
-        where: { user_id },
-        order: { created_at: 'DESC' },
-        take: limit,
-        skip: offset
-    };
-
-    // Add conversation ID if provided
     if (conversation_id) {
-        queryOptions.where.conversation_id = conversation_id;
+        query = query.eq('conversation_id', conversation_id);
     }
 
-    // Get chat messages
-    const chatMessages = await chatMessageRepository.find(queryOptions);
+    const { data, error } = await query;
 
-    return chatMessages.reverse(); // Return in chronological order
+    if (error) {
+        throw new Error(`Failed to fetch chat messages: ${error.message}`);
+    }
+
+    return data.reverse();
 };
 
 /**
@@ -84,61 +71,170 @@ export const processUserMessage = async (
     message: string,
     user_id: string,
     conversation_id?: string
-): Promise<{ userMessage: ChatMessage; aiMessage: ChatMessage }> => {
-    // Save user message
-    const userMessage = await saveChatMessage(message, 'user', user_id, conversation_id);
-
-    // Generate AI response
+) => {
+    const convId = conversation_id ?? uuidv4();
+    
+    const userMessage = await saveChatMessage(message, 'user', user_id, convId);
     const aiResponse = await generateAIResponse(message);
-
-    // Save AI response
-    const aiMessage = await saveChatMessage(aiResponse, 'ai', user_id, conversation_id);
+    const aiMessage = await saveChatMessage(aiResponse, 'ai', user_id, convId);
 
     return {
         userMessage,
-        aiMessage
+        aiMessage,
     };
 };
 
 /**
- * Get user's conversations
+ * Get user's conversations (latest message per conversation)
  */
 export const getUserConversations = async (
-    user_id: string
-): Promise<{ conversation_id: string; lastMessage: string; created_at: Date }[]> => {
-    // Find user
-    const user = await userRepository.findOne({
-        where: { id: user_id }
-    });
+  userId: string
+): Promise<{ conversationId: string; lastMessage: string; createdAt: Date }[]> => {
+  const supabase = getSupabaseClient();
+  
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .select('*')
+    .eq('id', userId)
+    .single();
 
-    if (!user) {
-        throw new Error('User not found');
+  if (userError || !user) {
+    throw new Error('User not found');
+  }
+
+  const { data: messages, error } = await supabase
+    .from('chat_messages')
+    .select('conversation_id, content, created_at')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error(error);
+    throw new Error(`Failed to fetch conversations: ${error.message}`);
+  }
+
+  const conversationMap = new Map();
+  messages?.forEach((msg) => {
+    if (msg.conversation_id && !conversationMap.has(msg.conversation_id)) {
+      conversationMap.set(msg.conversation_id, {
+        conversationId: msg.conversation_id,
+        lastMessage: msg.content,
+        createdAt: new Date(msg.created_at)
+      });
+    }
+  });
+
+  return Array.from(conversationMap.values());
+};
+
+/**
+ * Delete a single message
+ */
+export const deleteMessage = async (
+    message_id: string,
+    user_id: string
+): Promise<void> => {
+    const supabase = getSupabaseClient();
+
+    // Verify message belongs to user
+    const { data: message, error: fetchError } = await supabase
+        .from('chat_messages')
+        .select('*')
+        .eq('conversation_id', message_id)
+        .eq('user_id', user_id)
+        .single();
+
+    if (fetchError || !message) {
+        throw new Error('Message not found or unauthorized');
     }
 
-    // Get distinct conversation IDs with their latest message
-    const conversations = await AppDataSource.query(`
-        WITH LatestMessages AS (
-            SELECT 
-                conversation_id,
-                content,
-                created_at,
-                ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY created_at DESC) as RowNum
-            FROM 
-                chat_messages
-            WHERE 
-                user_id = $1
-        )
-        SELECT 
-            conversation_id,
-            content as lastMessage,
-            created_at
-        FROM 
-            LatestMessages
-        WHERE 
-            RowNum % 2 = 0
-        ORDER BY 
-            created_at DESC
-    `, [user_id]);
+    // Delete message
+    const { error } = await supabase
+        .from('chat_messages')
+        .delete()
+        .eq('conversation_id', message_id);
 
-    return conversations;
+    if (error) {
+        throw new Error(`Failed to delete message: ${error.message}`);
+    }
+};
+
+/**
+ * Delete entire conversation
+ */
+export const deleteConversation = async (
+    conversation_id: string,
+    user_id: string
+): Promise<void> => {
+    const supabase = getSupabaseClient();
+
+    // Delete all messages in conversation
+    const { error } = await supabase
+        .from('chat_messages')
+        .delete()
+        .eq('conversation_id', conversation_id)
+        .eq('user_id', user_id);
+
+    if (error) {
+        throw new Error(`Failed to delete conversation: ${error.message}`);
+    }
+};
+
+/**
+ * Delete all conversations for a user
+ */
+export const deleteAllConversations = async (
+    user_id: string
+): Promise<void> => {
+    const supabase = getSupabaseClient();
+
+    const { error } = await supabase
+        .from('chat_messages')
+        .delete()
+        .eq('user_id', user_id);
+
+    if (error) {
+        throw new Error(`Failed to delete all conversations: ${error.message}`);
+    }
+};
+
+/**
+ * Update a message (for edit functionality)
+ */
+export const updateMessage = async (
+    message_id: string,
+    user_id: string,
+    new_content: string
+): Promise<any> => {
+    const supabase = getSupabaseClient();
+
+    // Verify message belongs to user and is a user message
+    const { data: message, error: fetchError } = await supabase
+        .from('chat_messages')
+        .select('*')
+        .eq('id', message_id)
+        .eq('user_id', user_id)
+        .eq('sender', 'user')
+        .single();
+
+    if (fetchError || !message) {
+        throw new Error('Message not found or cannot be edited');
+    }
+
+    // Update message
+    const { data, error } = await supabase
+        .from('chat_messages')
+        .update({ 
+            content: new_content,
+            updated_at: new Date()
+        })
+        .eq('id', message_id)
+        .select()
+        .single();
+
+    if (error) {
+        throw new Error(`Failed to update message: ${error.message}`);
+    }
+
+    return data;
 };
