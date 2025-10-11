@@ -9,6 +9,7 @@ import { chatRouter } from './routes/chat';
 import { authRouter } from './routes/auth';
 import { setupSocketHandlers } from './socket/socketHandlers';
 import { initializeDatabase } from './config/database';
+import { setupVoiceHandlers } from './socket/voiceSocketHandlers';
 
 // Load environment variables
 dotenv.config();
@@ -54,6 +55,7 @@ const io = new Server(server, {
 
 // Set up Socket.IO handlers
 setupSocketHandlers(io);
+setupVoiceHandlers(io);
 
 // Start server
 server.listen(PORT, () => {
